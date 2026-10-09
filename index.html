@@ -93,7 +93,6 @@
   // downloads the engine and model (tens of megabytes) and the browser
   // keeps them for next time. See DECISIONS.md, ADR-19.
   var ENGINE_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
-  var MODEL_ID = 'Xenova/whisper-tiny.en';
   var SAMPLE_RATE = 16000;
   var FRAME_SIZE = 4096;            // 256 ms of audio per frame
   var END_SILENCE_FRAMES = 3;       // ~0.8 s of quiet ends a spoken phrase
@@ -108,6 +107,12 @@
   var params = new URLSearchParams(window.location.search);
   var openerOrigin = params.get('o') || '';
   var sendTarget = (openerOrigin && openerOrigin !== 'null') ? openerOrigin : '*';
+
+  // Default is the small, fast model. Adding ?model=base to the voice address in the
+  // Settings sheet switches to a larger, more accurate one (bigger one-time download,
+  // slower to transcribe).
+  var MODELS = { tiny: 'Xenova/whisper-tiny.en', base: 'Xenova/whisper-base.en' };
+  var MODEL_ID = MODELS[params.get('model')] || MODELS.tiny;
 
   var dial = document.getElementById('dial');
   var statusEl = document.getElementById('status');
@@ -333,7 +338,11 @@
     return t.replace(/\[[^\]]*\]|\([^)]*\)|\*[^*]*\*/g, ' ').replace(/\s+/g, ' ').trim();
   }
   var SILENCE_INVENTIONS = /^(thank you\.?|thanks for watching\.?|you\.?|bye\.?|\.+)$/i;
-  var WAKE = /\b(?:hey|hay)[\s,.!-]*(?:may|mae|mei|maye)\b/i;
+  // The small model often mishears the short phrase "Hey, May" (for example as
+  // "Hear me"). The exact phrase is accepted anywhere; the looser look-alikes only
+  // at the very start of a phrase, so ordinary sentences are less likely to wake it.
+  var WAKE_STRICT = /\b(?:hey|hay|hi)[\s,.!-]*(?:may|mae|mei|maye)\b/i;
+  var WAKE_LOOSE = /^[\s"'(\[]*(?:hey|hay|hi|he|hear|ay|eh)[\s,.!-]*(?:may|mae|mei|maye|me|mea|mia|my)\b/i;
   var ENDS_WITH_OVER = /^(.*?)[\s,.!?;:-]*\bover\b[\s.!?,]*$/i;
 
   function handleText(raw) {
@@ -342,7 +351,7 @@
     if (!text || paused) return;
 
     if (state === 'awaiting_wake') {
-      var m = text.match(WAKE);
+      var m = text.match(WAKE_STRICT) || text.match(WAKE_LOOSE);
       if (!m) return;
       enterActive();
       var rest = text.slice(m.index + m[0].length).replace(/^[\s,.!?-]+/, '');
