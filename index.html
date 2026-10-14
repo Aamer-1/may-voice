@@ -64,6 +64,8 @@
   button:hover { border-color: var(--glow); }
   button[hidden] { display: none; }
   .note { margin: 0 0 8px; font-size: 13.5px; line-height: 1.45; color: var(--dim); }
+  button.link { margin: 0 0 10px; padding: 4px 8px; font-size: 13px; letter-spacing: 0; background: none; border: 0; color: var(--dim); text-decoration: underline; }
+  button.link:hover { color: var(--ice); }
   .debug { margin: 0; font-size: 11px; line-height: 1.4; color: var(--dim); opacity: 0.75; overflow-wrap: anywhere; }
   @media (prefers-reduced-motion: reduce) { * { animation-duration: .001ms !important; } }
 </style>
@@ -78,7 +80,8 @@
     <div class="meter" aria-hidden="true"><i id="meterFill"></i></div>
     <p class="heard" id="heard"></p>
     <button id="actionBtn" type="button" hidden>Tap to start</button>
-    <p class="note">Keep this window open. Say &ldquo;Hey, May&rdquo;, speak, then say &ldquo;over&rdquo;. Listening happens inside this window &mdash; no audio is sent to any speech service.</p>
+    <p class="note">Keep this window open. Say &ldquo;Hey, May&rdquo; (or just &ldquo;Computer&rdquo;), speak, then say &ldquo;over&rdquo;. Listening happens inside this window &mdash; no audio is sent to any speech service.</p>
+    <button id="modelBtn" type="button" class="link">Speech model: fast &mdash; tap for better accuracy</button>
     <p class="debug" id="debug"></p>
   </div>
 
@@ -92,6 +95,7 @@
   // so the built-in browser feature cannot work there. The first run
   // downloads the engine and model (tens of megabytes) and the browser
   // keeps them for next time. See DECISIONS.md, ADR-19.
+  var BUILD = '2026-10-08 wake-v3';   // shown at the bottom of the window, so you can tell which copy is live
   var ENGINE_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
   var SAMPLE_RATE = 16000;
   var FRAME_SIZE = 4096;            // 256 ms of audio per frame
@@ -108,17 +112,20 @@
   var openerOrigin = params.get('o') || '';
   var sendTarget = (openerOrigin && openerOrigin !== 'null') ? openerOrigin : '*';
 
-  // Default is the small, fast model. Adding ?model=base to the voice address in the
-  // Settings sheet switches to a larger, more accurate one (bigger one-time download,
-  // slower to transcribe).
+  // Default is the small, fast model. The switch at the bottom of the window changes to a
+  // larger, more accurate one (bigger one-time download, slower) and remembers the choice.
   var MODELS = { tiny: 'Xenova/whisper-tiny.en', base: 'Xenova/whisper-base.en' };
-  var MODEL_ID = MODELS[params.get('model')] || MODELS.tiny;
+  var savedModel = '';
+  try { savedModel = localStorage.getItem('mayModel') || ''; } catch (e) { /* storage unavailable */ }
+  var MODEL_KEY = MODELS[params.get('model')] ? params.get('model') : (MODELS[savedModel] ? savedModel : 'tiny');
+  var MODEL_ID = MODELS[MODEL_KEY];
 
   var dial = document.getElementById('dial');
   var statusEl = document.getElementById('status');
   var meterFill = document.getElementById('meterFill');
   var heardEl = document.getElementById('heard');
   var actionBtn = document.getElementById('actionBtn');
+  var modelBtn = document.getElementById('modelBtn');
   var debugEl = document.getElementById('debug');
 
   var state = 'loading';           // loading | awaiting_wake | active | error
@@ -149,7 +156,7 @@
   }
 
   function showDebug() {
-    var bits = ['origin: ' + window.location.origin, 'model: ' + MODEL_ID];
+    var bits = ['build: ' + BUILD, 'model: ' + MODEL_ID];
     if (!window.opener) bits.push('not opened from the dashboard');
     if (lastError) bits.push('last error: ' + lastError);
     debugEl.textContent = bits.join(' \u00b7 ');
@@ -163,7 +170,7 @@
   function setState(next) {
     state = next;
     dial.className = 'dial ' + ({ loading: 'loading', awaiting_wake: 'listening', active: 'active', error: 'error' }[next] || '');
-    if (next === 'awaiting_wake') setStatus('Listening for \u201cHey, May\u201d\u2026');
+    if (next === 'awaiting_wake') setStatus('Listening for \u201cHey, May\u201d or \u201cComputer\u201d\u2026');
     else if (next === 'active') setStatus('Listening \u2014 say \u201cover\u201d when you are done.');
     showDebug();
   }
@@ -341,8 +348,11 @@
   // The small model often mishears the short phrase "Hey, May" (for example as
   // "Hear me"). The exact phrase is accepted anywhere; the looser look-alikes only
   // at the very start of a phrase, so ordinary sentences are less likely to wake it.
-  var WAKE_STRICT = /\b(?:hey|hay|hi)[\s,.!-]*(?:may|mae|mei|maye)\b/i;
-  var WAKE_LOOSE = /^[\s"'(\[]*(?:hey|hay|hi|he|hear|ay|eh)[\s,.!-]*(?:may|mae|mei|maye|me|mea|mia|my)\b/i;
+  // "Computer" is a long, distinctive word the small model hears reliably, so it is
+  // accepted as an easier alternative, but only at the very start of a phrase.
+  var WAKE_STRICT = /\b(?:hey|hay|hi|hello|hallo|okay|ok)[\s,.!-]*(?:may|mae|mei|maye)\b/i;
+  var WAKE_LOOSE = /^[\s"'(\[]*(?:hey|hay|hi|he|hear|ay|eh|hello|hallo)[\s,.!-]*(?:may|mae|mei|maye|me|mea|mia)\b/i;
+  var WAKE_WORD = /^[\s"'(\[]*(?:(?:hey|hi|ok|okay)[\s,.!-]*)?computer\b/i;
   var ENDS_WITH_OVER = /^(.*?)[\s,.!?;:-]*\bover\b[\s.!?,]*$/i;
 
   function handleText(raw) {
@@ -351,7 +361,7 @@
     if (!text || paused) return;
 
     if (state === 'awaiting_wake') {
-      var m = text.match(WAKE_STRICT) || text.match(WAKE_LOOSE);
+      var m = text.match(WAKE_STRICT) || text.match(WAKE_LOOSE) || text.match(WAKE_WORD);
       if (!m) return;
       enterActive();
       var rest = text.slice(m.index + m[0].length).replace(/^[\s,.!?-]+/, '');
@@ -374,7 +384,7 @@
       if (state === 'active') {
         messageParts = [];
         setState('awaiting_wake');
-        heardEl.textContent = 'Timed out \u2014 say \u201cHey, May\u201d to start again.';
+        heardEl.textContent = 'Timed out \u2014 say \u201cHey, May\u201d or \u201cComputer\u201d to start again.';
       }
     }, ACTIVE_TIMEOUT_MS);
   }
@@ -411,6 +421,14 @@
     if (!window.opener || event.source !== window.opener || !event.data) return;
     if (event.data.type === 'may-is-speaking') { paused = true; resetCapture(); }
     else if (event.data.type === 'may-done-speaking') { paused = false; resetCapture(); }
+  });
+
+  modelBtn.textContent = MODEL_KEY === 'base'
+    ? 'Speech model: better accuracy \u2014 tap to go back to fast'
+    : 'Speech model: fast \u2014 tap for better accuracy';
+  modelBtn.addEventListener('click', function () {
+    try { localStorage.setItem('mayModel', MODEL_KEY === 'base' ? 'tiny' : 'base'); } catch (e) { /* storage unavailable */ }
+    window.location.reload();
   });
 
   // ---- Go ----
